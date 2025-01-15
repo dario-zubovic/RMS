@@ -490,8 +490,8 @@ class BufferedCapture(Process):
                     log.info("GStreamer Buffer did not contain a frame.")
                     return False, None, None
 
-                # Handling for grayscale conversion
-                frame = self.handleGrayscaleConversion(map_info)
+                # Cast to uint8 if necessary
+                frame = np.ndarray(shape=self.frame_shape, buffer=map_info.data, dtype=np.uint8)
 
                 # Smooth raw pts and calculate actual timestamp
                 smoothed_pts = self.smoothPTS(gst_timestamp_ns)
@@ -660,23 +660,6 @@ class BufferedCapture(Process):
             return True
         
         return False
-
-    
-    def handleGrayscaleConversion(self, map_info):
-        """Handle conversion of frame to grayscale if necessary."""
-
-        # If the frame is already grayscale, return it as is
-        if len(self.frame_shape) == 2:
-            return np.ndarray(shape=self.frame_shape, buffer=map_info.data, dtype=np.uint8)
-
-        if (self.daytime_mode is not None) and (self.daytime_mode.value):
-            return np.ndarray(shape=self.frame_shape, buffer=map_info.data, dtype=np.uint8)
-
-        # Convert to grayscale by selecting a specific channel
-        bgr_frame = np.ndarray(shape=self.frame_shape, buffer=map_info.data, dtype=np.uint8)
-        gray_frame = bgr_frame[:, :, 0]  # Assuming the blue channel for grayscale
-        return gray_frame
-
 
 
     def moveSegment(self, splitmuxsink, fragment_id):
@@ -1369,6 +1352,29 @@ class BufferedCapture(Process):
         finally:
             self.releaseResources()
 
+    def convertToGrayscale(frame):
+        """Converts provided frame to one channel if it's not already"""
+
+        # Convert the frame to grayscale
+        if len(frame.shape) == 3:
+
+            # If a color image is given, take the green channel
+            if frame.shape[2] == 3:
+
+                gray = frame[:, :, 1]
+
+            # If UYVY image given, take luma (Y) channel
+            elif self.config.uyvy_pixelformat and (frame.shape[2] == 2):
+                gray = frame[:, :, 1]
+
+            # Otherwise, take the first available channel
+            else:
+                gray = frame[:, :, 0]
+
+        else: # already converted
+            gray = frame
+
+        return gray
 
 
     def captureFrames(self):
@@ -1525,6 +1531,10 @@ class BufferedCapture(Process):
                     and self.video_file is None
                     and total_frames % self.config.frame_save_interval_count == 0):
 
+                    # avoid storing duplicate data
+                    if self.convert_to_gray:
+                        frame = convertToGrayscale(frame)
+
                     # In case of a mode switch, the frame shape might change (color or grayscale)
                     if frame.shape != self.current_raw_frame_shape:
                         log.info("Frame shape changed, reinitializing arrays...")
@@ -1654,33 +1664,13 @@ class BufferedCapture(Process):
                 last_frame_timestamp = frame_timestamp
                 
 
-                ### Convert the frame to grayscale ###  (Not to be done in case of daytime mode)
+                # Convert the frame, clip to ROI and pass to shared arrays for further processing
+                # unless it's daytime mode
                 if (self.daytime_mode is None) or (not self.daytime_mode.value):
 
                     t1_convert = time.time()
 
-                    # Convert the frame to grayscale
-                    #gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-                    # Convert the frame to grayscale
-                    if len(frame.shape) == 3:
-
-                        # If a color image is given, take the green channel
-                        if frame.shape[2] == 3:
-
-                            gray = frame[:, :, 1]
-
-                        # If UYVY image given, take luma (Y) channel
-                        elif self.config.uyvy_pixelformat and (frame.shape[2] == 2):
-                            gray = frame[:, :, 1]
-
-                        # Otherwise, take the first available channel
-                        else:
-                            gray = frame[:, :, 0]
-
-                    else:
-                        gray = frame
-
+                    frame = convertToGrayscale(frame)
 
                     # Cut the frame to the region of interest (ROI)
                     gray = gray[self.config.roi_up:self.config.roi_down, \
@@ -1688,12 +1678,6 @@ class BufferedCapture(Process):
 
                     # Track time for frame conversion
                     t_convert = time.time() - t1_convert
-
-
-                    ### ###
-
-
-
 
                     # Assign the frame to shared memory (track time to do so)
   
@@ -1704,8 +1688,6 @@ class BufferedCapture(Process):
                         self.array2[i, :gray.shape[0], :gray.shape[1]] = gray
 
                     t_assignment = time.time() - t1_assign
-
-
 
                 # Keep track of all captured frames
                 total_frames += 1
